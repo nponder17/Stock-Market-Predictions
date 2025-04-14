@@ -45,7 +45,7 @@ def main():
             
 
                 #TensorFlow Predictions
-                tensorFlowPredictions = getTensorFlowPredictions(allFeatures, prefix)
+        tensorFlowPredictions = getTensorFlowPredictions(allFeatures, prefix)
 
                 
 
@@ -157,56 +157,51 @@ def checkFeatureCorrelation(priceColumn, volumeColumn, computedData):
 
      correlationMatrix = potentialFeatures.corr()
 
-     #print(correlationMatrix)
+     print(correlationMatrix)
 
      return potentialFeatures
 
 
 def getTensorFlowPredictions(allFeatures, prefix):
 
-    #create features for the model
-    #since we will want to try to predict the next days price
-    #we will drop the next day price and not include it in the features
 
-    features = allFeatures.drop(columns = ['Next Day Price']).values
-
+    # Create features for the model
+    features = allFeatures.drop(columns=['Next Day Price']).values
     priceChange = allFeatures["Next Day Price"].values - allFeatures[prefix + '_Price'].values
-
     targetGainLoss = (priceChange > 0).astype(int)
     targetPrice = allFeatures["Next Day Price"].values
 
     targets = np.column_stack((targetGainLoss, targetPrice))
 
-    #check the shape of features and target
-    #features should be 1243 x 10 (numerical)
-    #target should be 1243 x 1 (binary)
-    #print(features.shape)
-    #print(target.shape)
-
     print("targetGainLoss shape:", targetGainLoss.shape)
     print("targetPrice shape:", targetPrice.shape)
 
-
-    #convert features and target into tensor flow tensors
-
-    featureTensor = tf.convert_to_tensor(features, dtype = tf.float32)
-    targetTensor = tf.convert_to_tensor(targets, dtype = tf.float32)
-
-    #check shape for debugging
-
-    #print(featureTensor.shape)
-    #print(targetTensor.shape)
+    # Convert features and target into tensor flow tensors
+    featureTensor = tf.convert_to_tensor(features, dtype=tf.float32)
+    targetTensor = tf.convert_to_tensor(targets, dtype=tf.float32)
 
     # Split data
     trainingSize = int(0.8 * len(featureTensor))
     featureTrain, featureTest = featureTensor[:trainingSize], featureTensor[trainingSize:]
     targetTrain, targetTest = targetTensor[:trainingSize], targetTensor[trainingSize:]
 
-
     # Normalize the feature data
     scaler = StandardScaler()
     featureTrain = scaler.fit_transform(featureTrain)  # Fit on train, transform train
     featureTest = scaler.transform(featureTest)  # Only transform test
+
+    # Scale the target data
+    targetScaler = StandardScaler()
+    targetTrain_numpy = targetTrain.numpy()  # Convert to NumPy array
+    targetTest_numpy = targetTest.numpy()  # Convert to NumPy array
+
+    # Reshaping the target arrays using NumPy
+    targetTrain_numpy[:, 1] = targetScaler.fit_transform(targetTrain_numpy[:, 1].reshape(-1, 1)).flatten()  # Scaling only price
+    targetTest_numpy[:, 1] = targetScaler.transform(targetTest_numpy[:, 1].reshape(-1, 1)).flatten()  # Scaling only price
+
+    # Convert them back to tensors
+    targetTrain = tf.convert_to_tensor(targetTrain_numpy, dtype=tf.float32)
+    targetTest = tf.convert_to_tensor(targetTest_numpy, dtype=tf.float32)
 
     numSamplesTrain = featureTrain.shape[0]
     numSamplesTest = featureTest.shape[0]
@@ -230,73 +225,112 @@ def getTensorFlowPredictions(allFeatures, prefix):
     targetTrain = tf.reshape(targetTrain, (numSamplesTrain // timeSteps, timeSteps, targetTrain.shape[1]))
     targetTest = tf.reshape(targetTest, (numSamplesTest // timeSteps, timeSteps, targetTest.shape[1]))
 
-    print("featureTrain shape after reshaping:", featureTrain.shape)
-    print("featureTest shape after reshaping:", featureTest.shape)
-    print("targetTrain shape after reshaping:", targetTrain.shape)
-    print("targetTest shape after reshaping:", targetTest.shape)
+    # Extract the price targets for training and testing
+    priceTargetTrain = targetTrain[:, -1, 1]  # Price target for train
+    priceTargetTest = targetTest[:, -1, 1]    # Price target for test
 
-    # Define the Sequential model
-    model = models.Sequential()
+    input_layer = layers.Input(shape=(timeSteps, numFeatures))
 
-    model.add(layers.LSTM(units = 64, input_shape = (timeSteps, numFeatures)))
+    lstm_1 = layers.LSTM(64, return_sequences=True)(input_layer)
+    lstm_2 = layers.LSTM(32)(lstm_1)
 
-    #need two output layers. one for binary and one for numerical values
+    # Price Prediction Output (Regression)
+    price_output = layers.Dense(1, activation='linear', name='priceOutput')(lstm_2)
 
-    #output for binary 0 for price decrease, 1 for price increase
+    # Gain/Loss Prediction Output (Classification)
+    classification_output = layers.Dense(1, activation='sigmoid', name='classOutput')(lstm_2)
 
-    model.add(layers.Dense(1, activation = 'sigmoid' , name = 'binaryOutput'))
-
-    #output for next day price
-
-    model.add(layers.Dense(1, activation = 'linear', name = 'priceOutput'))
-
+    # Define model with two outputs
+    model = models.Model(inputs=input_layer, outputs=[price_output, classification_output])
 
     model.compile(
         optimizer=Adam(),
         loss={
-            'binaryOutput': 'binary_crossentropy',
-            'priceOutput': 'mean_squared_error'
+            'priceOutput': 'mean_squared_error',
+            'classOutput': 'binary_crossentropy'
         },
         metrics={
-            'binaryOutput': 'accuracy',
-            'priceOutput': 'mae'
+            'priceOutput': ['mae'],
+            'classOutput': ['accuracy']
         }
     )
 
     model.summary()
 
-    #print("featureTrain shape:", featureTrain.shape)
-    #print("targetTrain shape:", targetTrain.shape)
-    #print("featureTest shape:", featureTest.shape)
-    #print("targetTest shape:", targetTest.shape)
-
-    # Visualize the model
-    #plot_model(model, to_file='newModelStructure.png', show_shapes=True, show_layer_names=True)
-
-    binaryTargetTrain = targetTrain[:, -1, 0]
+    # Targets
     priceTargetTrain = targetTrain[:, -1, 1]
-
-    binaryTargetTest = targetTest[:, -1, 0]
     priceTargetTest = targetTest[:, -1, 1]
+    classTargetTrain = targetTrain[:, -1, 0]
+    classTargetTest = targetTest[:, -1, 0]
 
+    # Fit the model
     model.fit(
-    featureTrain,
-    {
-        'binaryOutput': binaryTargetTrain,  # Binary classification target
-        'priceOutput': priceTargetTrain    # Price prediction target
-    },
-    epochs=10, #number of iterations the model will train for
-    batch_size=32, #number of samples the model will use at once
-
-    #validation data is for model performance
-    validation_data=(
-        featureTest,
-        {
-            'binaryOutput': binaryTargetTest,  # Binary classification target
-            'priceOutput': priceTargetTest    # Price prediction target
-        }
+        featureTrain,
+        {'priceOutput': priceTargetTrain, 'classOutput': classTargetTrain},
+        epochs=20,
+        batch_size=32,
+        validation_data=(featureTest, {
+            'priceOutput': priceTargetTest,
+            'classOutput': classTargetTest
+        })
     )
-)
+
+    # Evaluate
+    test_metrics = model.evaluate(
+        featureTest,
+        {'priceOutput': priceTargetTest, 'classOutput': classTargetTest}
+    )
+
+
+    # Predict
+    price_preds, class_preds = model.predict(featureTest)
+
+    # Convert classification predictions to 0 or 1
+    class_preds_binary = (class_preds > 0.5).astype(int)
+
+    # Plot gain/loss
+    plt.figure(figsize=(8, 4))
+    plt.plot(classTargetTest, label='Actual Gain/Loss', linestyle='--')
+    plt.plot(class_preds_binary, label='Predicted Gain/Loss', alpha=0.7)
+    plt.title('Gain/Loss Prediction')
+    plt.legend()
+    plt.show()
+
+        # Plot the actual vs predicted prices
+    plt.figure(figsize=(10, 6))
+    plt.plot(priceTargetTest, label="Actual Prices", color='blue')
+    plt.plot(price_preds, label="Predicted Prices", color='red')
+    plt.title("Actual vs Predicted Prices")
+    plt.xlabel("Sample Index")
+    plt.ylabel("Price (scaled)")
+    plt.legend()
+    plt.show()
+
+    #graph using validation data
+
+        # Graph using validation data
+    val_price_preds, val_class_preds = model.predict(featureTest)
+    val_class_preds_binary = (val_class_preds > 0.5).astype(int)
+
+    # Plot the actual vs predicted prices using validation data
+    plt.figure(figsize=(10, 6))
+    plt.plot(priceTargetTest, label="Actual Prices (Validation)", color='blue')
+    plt.plot(val_price_preds, label="Predicted Prices (Validation)", color='red')
+    plt.title("Validation: Actual vs Predicted Prices")
+    plt.xlabel("Sample Index")
+    plt.ylabel("Price (scaled)")
+    plt.legend()
+    plt.show()
+
+    # Plot validation gain/loss predictions
+    plt.figure(figsize=(8, 4))
+    plt.plot(classTargetTest, label='Actual Gain/Loss (Validation)', linestyle='--')
+    plt.plot(val_class_preds_binary, label='Predicted Gain/Loss (Validation)', alpha=0.7)
+    plt.title('Validation: Gain/Loss Prediction')
+    plt.legend()
+    plt.show()
+
+
 
 if __name__ == "__main__":
     main()
